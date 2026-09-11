@@ -227,7 +227,9 @@ class Builder2V3ModelAdapter(BaseModelService):
 
         return True, None
 
-    def predict(self, feature_result: FeatureResult) -> ModelResult:
+    def predict(
+        self, feature_result: FeatureResult, skip_explainability: bool = False
+    ) -> ModelResult:
         """Execute calibrated forecast-bust prediction conforming to BaseModelService."""
         # 1. Check adapter readiness
         if not self.is_ready or self.booster is None or self.calibrator is None:
@@ -255,7 +257,7 @@ class Builder2V3ModelAdapter(BaseModelService):
         # 3. Construct DataFrame with exact 50 ordered features
         if feature_result.features and len(feature_result.features) >= 50:
             df_features = pd.DataFrame([feature_result.features])
-        elif feature_result.metadata.get("feature_matrix_rows"):
+        elif feature_result.metadata and feature_result.metadata.get("feature_matrix_rows"):
             df_features = pd.DataFrame(feature_result.metadata["feature_matrix_rows"])
         elif feature_result.features:
             df_features = pd.DataFrame([feature_result.features])
@@ -324,13 +326,17 @@ class Builder2V3ModelAdapter(BaseModelService):
                     error=f"Probability calibration failure: {cal_err}",
                 )
 
-            # TreeSHAP feature contributions
-            contribs = self.booster.predict(df_features, pred_contrib=True)[0]
-            feature_contribs = dict(zip(self.feature_names, contribs[:50]))
-            sorted_contribs = sorted(feature_contribs.items(), key=lambda x: abs(x[1]), reverse=True)
-            dominant_drivers = [feat for feat, val in sorted_contribs[:4] if abs(val) > 0.001]
-            if not dominant_drivers:
-                dominant_drivers = [sorted_contribs[0][0]]
+            # TreeSHAP feature contributions (skipped for intermediate timeline points)
+            if not skip_explainability:
+                contribs = self.booster.predict(df_features, pred_contrib=True)[0]
+                feature_contribs = dict(zip(self.feature_names, contribs[:50]))
+                sorted_contribs = sorted(feature_contribs.items(), key=lambda x: abs(x[1]), reverse=True)
+                dominant_drivers = [feat for feat, val in sorted_contribs[:4] if abs(val) > 0.001]
+                if not dominant_drivers:
+                    dominant_drivers = [sorted_contribs[0][0]]
+            else:
+                feature_contribs = {}
+                dominant_drivers = ["ensemble_std"]
 
             # Failure fingerprint archetype classification
             first_row_dict = df_features.iloc[0].to_dict()

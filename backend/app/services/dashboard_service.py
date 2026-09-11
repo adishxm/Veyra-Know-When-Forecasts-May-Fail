@@ -102,10 +102,18 @@ class DashboardIntelligenceService:
             issue_time=issue_iso,
             valid_time=valid_iso,
         )
+        skip_expl = (h != 24)
         try:
-            pred_resp = agent.analyze(pred_req, weather_result=weather_res)
+            pred_resp = agent.analyze(
+                pred_req,
+                weather_result=weather_res,
+                skip_explainability=skip_expl,
+            )
         except TypeError:
-            pred_resp = agent.analyze(pred_req)
+            try:
+                pred_resp = agent.analyze(pred_req, weather_result=weather_res)
+            except TypeError:
+                pred_resp = agent.analyze(pred_req)
 
         is_certified = h <= 240
         within_h = pred_resp.within_trust_horizon if pred_resp.within_trust_horizon is not None else (h <= 168)
@@ -247,10 +255,21 @@ class DashboardIntelligenceService:
         # 3. Fetch weather data ONCE upfront
         #    WeatherResult is shared across all horizon workers, eliminating
         #    redundant upstream network calls, geocoding lookups, and JSON parsing.
+        #    Tailor forecast_days to requested mode to avoid fetching unused days:
+        #    - single (24h lead): 3 days buffer (72h)
+        #    - standard_7d (168h lead): 8 days buffer (192h)
+        #    - full_16d (384h lead): 16 days (384h)
+        max_h = max(horizons) if horizons else 24
+        needed_days = min(16, max(3, (max_h + 23) // 24 + 1))
+
         weather_res: Optional[Any] = None
         if hasattr(agent, "get_weather_data"):
             try:
-                weather_res = agent.get_weather_data(request.location, None)
+                try:
+                    weather_res = agent.get_weather_data(request.location, None, forecast_days=needed_days)
+                except TypeError:
+                    weather_res = agent.get_weather_data(request.location, None)
+
                 if weather_res and weather_res.is_available and weather_res.raw_data:
                     raw_records = weather_res.raw_data.get("records", [])
                     if raw_records and base_issue_dt is None:

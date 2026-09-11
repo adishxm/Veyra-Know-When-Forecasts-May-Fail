@@ -73,19 +73,29 @@ class Builder2V3FeatureAdapter(BaseFeatureService):
         # 2. Extract 50-feature DataFrame (cached on weather_result for multi-horizon reuse)
         target_var = weather_result.metadata.get("variable", "temperature_2m") if weather_result.metadata else "temperature_2m"
         cache_key = f"_v3_cache_{target_var}"
-        cached_features = getattr(weather_result, cache_key, None)
-        if cached_features is not None:
-            X, meta_rows = cached_features
+        cached_bundle = getattr(weather_result, cache_key, None)
+        if cached_bundle is not None:
+            if isinstance(cached_bundle, tuple) and len(cached_bundle) == 4:
+                X, meta_rows, lead_to_idx, valid_to_idx = cached_bundle
+            else:
+                X, meta_rows = cached_bundle[:2]
+                lead_to_idx = {int(m.get("lead_hours", -1)): i for i, m in enumerate(meta_rows) if m.get("lead_hours", 0) > 0}
+                valid_to_idx = {str(m.get("valid_time", "")).replace(" ", "T")[:16]: i for i, m in enumerate(meta_rows) if m.get("lead_hours", 0) > 0}
         else:
             try:
                 X, meta_rows = self.pipeline.extract_from_records(
                     raw_records, target_variable=target_var
                 )
                 if not X.empty:
+                    lead_to_idx = {int(m.get("lead_hours", -1)): i for i, m in enumerate(meta_rows) if m.get("lead_hours", 0) > 0}
+                    valid_to_idx = {str(m.get("valid_time", "")).replace(" ", "T")[:16]: i for i, m in enumerate(meta_rows) if m.get("lead_hours", 0) > 0}
                     try:
-                        setattr(weather_result, cache_key, (X, meta_rows))
+                        setattr(weather_result, cache_key, (X, meta_rows, lead_to_idx, valid_to_idx))
                     except Exception:
                         pass
+                else:
+                    lead_to_idx = {}
+                    valid_to_idx = {}
             except Exception as exc:
                 logger.error("V3 feature extraction error: %s", exc)
                 return FeatureResult(
@@ -120,53 +130,45 @@ class Builder2V3FeatureAdapter(BaseFeatureService):
 
         # 4. Target record selection (match valid_time / target_date if specified)
         target_valid = weather_result.metadata.get("valid_time") if weather_result.metadata else None
+        target_issue = weather_result.metadata.get("issue_time") if weather_result.metadata else None
         target_date = weather_result.target_date or (weather_result.metadata.get("target_date") if weather_result.metadata else None)
         DEFAULT_OPERATIONAL_LEAD_HOURS = 24
 
-        def find_default_lead_idx(rows: List[Dict[str, Any]]) -> int:
-            """Find index of canonical 24h operational horizon (strictly valid_time > issue_time)."""
-            positive_candidates = [
-                (abs(m.get("lead_hours", 0) - DEFAULT_OPERATIONAL_LEAD_HOURS), idx)
-                for idx, m in enumerate(rows)
-                if m.get("lead_hours", 0) > 0
-            ]
-            if positive_candidates:
-                return min(positive_candidates, key=lambda x: x[0])[1]
-            return 0
-
-        default_idx = find_default_lead_idx(meta_rows) if meta_rows else 0
+        default_idx = lead_to_idx.get(DEFAULT_OPERATIONAL_LEAD_HOURS)
+        if default_idx is None:
+            default_idx = next(iter(lead_to_idx.values()), 0) if lead_to_idx else 0
         selected_idx = default_idx
 
-        if target_valid and meta_rows:
+        # Fast direct lookup if target_valid or target_issue + target_valid is specified
+        if target_issue and target_valid:
             try:
-                dt_target = pd.to_datetime(target_valid, utc=True)
-                diffs = [
-                    abs(pd.to_datetime(m["valid_time"], utc=True) - dt_target)
-                    for m in meta_rows
-                ]
-                best_idx = int(np.argmin(diffs))
-                if meta_rows[best_idx].get("lead_hours", 0) > 0:
-                    selected_idx = best_idx
-                else:
+                calc_lead = int(round((pd.to_datetime(target_valid, utc=True) - pd.to_datetime(target_issue, utc=True)).total_seconds() / 3600.0))
+                if calc_lead in lead_to_idx:
+                    selected_idx = lead_to_idx[calc_lead]
+            except Exception:
+                pass
+
+        if selected_idx == default_idx and target_valid and meta_rows:
+            target_key = str(target_valid).replace(" ", "T")[:16]
+            if target_key in valid_to_idx:
+                selected_idx = valid_to_idx[target_key]
+            else:
+                target_prefix = target_key[:13]
+                found = False
+                for i, m in enumerate(meta_rows):
+                    if str(m.get("valid_time", "")).replace(" ", "T").startswith(target_prefix) and m.get("lead_hours", 0) > 0:
+                        selected_idx = i
+                        found = True
+                        break
+                if not found:
                     selected_idx = default_idx
-            except Exception as match_err:
-                logger.debug("Failed matching valid_time '%s': %s", target_valid, match_err)
-                selected_idx = default_idx
-        elif target_date and meta_rows:
-            try:
-                dt_target = pd.to_datetime(target_date, utc=True)
-                diffs = [
-                    abs(pd.to_datetime(m["valid_time"], utc=True) - dt_target)
-                    for m in meta_rows
-                ]
-                best_idx = int(np.argmin(diffs))
-                if meta_rows[best_idx].get("lead_hours", 0) > 0:
-                    selected_idx = best_idx
-                else:
-                    selected_idx = default_idx
-            except Exception as match_err:
-                logger.debug("Failed matching target_date '%s': %s", target_date, match_err)
-                selected_idx = default_idx
+
+        elif selected_idx == default_idx and target_date and meta_rows:
+            target_key = str(target_date)[:10]
+            for i, m in enumerate(meta_rows):
+                if str(m.get("valid_time", "")).startswith(target_key) and m.get("lead_hours", 0) > 0:
+                    selected_idx = i
+                    break
 
         # 5. Extract target row and metadata
         target_row = X.iloc[selected_idx].to_dict()
@@ -188,7 +190,6 @@ class Builder2V3FeatureAdapter(BaseFeatureService):
         }
 
         # If client passed explicit target issue_time and valid_time, calculate and propagate exact lead_hours
-        target_issue = weather_result.metadata.get("issue_time") if weather_result.metadata else None
         if target_issue and target_valid:
             try:
                 import math
@@ -211,7 +212,7 @@ class Builder2V3FeatureAdapter(BaseFeatureService):
             metadata={
                 "is_single_target": True,
                 "v3_schema": True,
-                "feature_matrix_rows": X.to_dict(orient="records"),
+                "feature_matrix_rows": None,
                 "metadata_rows": meta_rows,
                 "instability_fingerprint": fingerprint_dict,
                 "ood_score": float(target_row.get("ood_score", 0.0)),

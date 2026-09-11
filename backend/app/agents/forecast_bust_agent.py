@@ -64,11 +64,17 @@ class ForecastBustAgent:
         return request.location.strip(), request.target_date
 
     def get_weather_data(
-        self, location: str, target_date: Optional[str]
+        self,
+        location: str,
+        target_date: Optional[str] = None,
+        forecast_days: Optional[int] = None,
     ) -> WeatherResult:
         """Fetch weather and atmospheric forecast data from injected weather service."""
         try:
-            return self.weather_service.get_forecast(location, target_date)
+            try:
+                return self.weather_service.get_forecast(location, target_date, forecast_days=forecast_days)
+            except TypeError:
+                return self.weather_service.get_forecast(location, target_date)
         except Exception as exc:
             logger.error("WeatherService raised an unexpected error: %s", exc)
             return WeatherResult(
@@ -90,10 +96,15 @@ class ForecastBustAgent:
                 error=f"FeatureService error: {exc}",
             )
 
-    def run_model(self, feature_result: FeatureResult) -> ModelResult:
+    def run_model(
+        self, feature_result: FeatureResult, skip_explainability: bool = False
+    ) -> ModelResult:
         """Execute ML model inference via injected model service."""
         try:
-            return self.model_service.predict(feature_result)
+            try:
+                return self.model_service.predict(feature_result, skip_explainability=skip_explainability)
+            except TypeError:
+                return self.model_service.predict(feature_result)
         except Exception as exc:
             logger.error("ModelService raised an unexpected error: %s", exc)
             return ModelResult(
@@ -129,10 +140,11 @@ class ForecastBustAgent:
         model_result: Optional[ModelResult] = None,
         weather_result: Optional[WeatherResult] = None,
         feature_result: Optional[FeatureResult] = None,
+        skip_explainability: bool = False,
     ) -> PredictionResponse:
         """Construct the standardized API response payload."""
         explanation = None
-        if not safety_assessment.abstain and model_result and model_result.is_ready and model_result.probability is not None:
+        if not skip_explainability and not safety_assessment.abstain and model_result and model_result.is_ready and model_result.probability is not None:
             raw_expl = model_result.metadata.get("explanation") if model_result.metadata else None
             if raw_expl is not None:
                 explanation = self.explainability_service.validate_explanation(raw_expl)
@@ -285,6 +297,8 @@ class ForecastBustAgent:
         self,
         request: PredictionRequest,
         weather_result: Optional[WeatherResult] = None,
+        skip_explainability: bool = False,
+        forecast_days: Optional[int] = None,
     ) -> PredictionResponse:
         """Main entry point orchestrating the end-to-end evaluation pipeline with operational telemetry.
 
@@ -300,7 +314,7 @@ class ForecastBustAgent:
 
             # 2. Weather Data Collection Stage
             if weather_result is None:
-                weather_result = self.get_weather_data(location, target_date)
+                weather_result = self.get_weather_data(location, target_date, forecast_days=forecast_days)
             else:
                 # Thread-safe shallow copy with request-specific metadata
                 weather_eval = WeatherResult(
@@ -324,6 +338,7 @@ class ForecastBustAgent:
                     location=location,
                     safety_assessment=safety_assessment,
                     weather_result=weather_result,
+                    skip_explainability=skip_explainability,
                 )
                 self._record_pipeline_telemetry(resp, request, start_t)
                 return resp
@@ -350,12 +365,13 @@ class ForecastBustAgent:
                     safety_assessment=safety_assessment,
                     weather_result=weather_result,
                     feature_result=feature_result,
+                    skip_explainability=skip_explainability,
                 )
                 self._record_pipeline_telemetry(resp, request, start_t)
                 return resp
 
             # 4. ML Model Prediction Stage
-            model_result = self.run_model(feature_result)
+            model_result = self.run_model(feature_result, skip_explainability=skip_explainability)
             if not model_result.is_ready or model_result.probability is None or model_result.error:
                 safety_assessment = self.apply_safety(
                     weather_result=weather_result,
@@ -368,6 +384,7 @@ class ForecastBustAgent:
                     model_result=model_result,
                     weather_result=weather_result,
                     feature_result=feature_result,
+                    skip_explainability=skip_explainability,
                 )
                 self._record_pipeline_telemetry(resp, request, start_t)
                 return resp
@@ -386,6 +403,7 @@ class ForecastBustAgent:
                 model_result=model_result,
                 weather_result=weather_result,
                 feature_result=feature_result,
+                skip_explainability=skip_explainability,
             )
             self._record_pipeline_telemetry(resp, request, start_t)
             return resp

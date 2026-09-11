@@ -31,10 +31,48 @@ from backend.app.core.http_retry import _extract_retry_after_seconds, execute_wi
 from backend.app.main import app
 from backend.app.safety.abstention import SafetyEvaluator
 from backend.app.schemas.prediction import PredictionRequest, ReasonCode
+from backend.app.services.base import BaseFeatureService, BaseModelService, FeatureResult, ModelResult
 from backend.app.services.explainability_service import ExplainabilityIntegrationService
 from backend.app.services.feature_service import LiveFeatureService
 from backend.app.services.model_service import LiveLogisticModelService
 from backend.app.services.openmeteo_service import OpenMeteoGEFSWeatherService
+
+
+class _DummyReadyFeatureService(BaseFeatureService):
+    @property
+    def is_ready(self) -> bool:
+        return True
+
+    def build_features(self, weather_result: Any) -> FeatureResult:
+        lead_h = 24.0
+        if getattr(weather_result, "metadata", None):
+            valid_t = weather_result.metadata.get("valid_time")
+            issue_t = weather_result.metadata.get("issue_time")
+            if valid_t and issue_t:
+                t_issue = datetime.fromisoformat(issue_t.replace("Z", "+00:00"))
+                t_valid = datetime.fromisoformat(valid_t.replace("Z", "+00:00"))
+                lead_h = float(round((t_valid - t_issue).total_seconds() / 3600.0))
+        return FeatureResult(
+            location=weather_result.location,
+            features={"spread": 1.2, "lead_hours": lead_h, "lead_time_hours": lead_h},
+            feature_names=["spread", "lead_hours", "lead_time_hours"],
+            is_ready=True,
+            metadata={},
+        )
+
+
+class _DummyReadyModelService(BaseModelService):
+    @property
+    def is_ready(self) -> bool:
+        return True
+
+    def predict(self, feature_result: FeatureResult, skip_explainability: bool = False) -> ModelResult:
+        return ModelResult(
+            probability=0.15,
+            model_version="test-model-v1",
+            is_ready=True,
+            metadata={},
+        )
 
 
 def _generate_synthetic_gefs_payload(
@@ -539,8 +577,8 @@ def test_end_to_end_agent_multi_horizon_cache_reuse():
         cache=cache,
         deduplicator=dedup,
     )
-    feature_svc = LiveFeatureService()
-    model_svc = LiveLogisticModelService()
+    feature_svc = _DummyReadyFeatureService()
+    model_svc = _DummyReadyModelService()
     safety_evaluator = SafetyEvaluator()
     expl_svc = ExplainabilityIntegrationService()
 
@@ -595,8 +633,8 @@ def test_end_to_end_agent_concurrent_multi_horizon_dedup():
         cache=cache,
         deduplicator=dedup,
     )
-    feature_svc = LiveFeatureService()
-    model_svc = LiveLogisticModelService()
+    feature_svc = _DummyReadyFeatureService()
+    model_svc = _DummyReadyModelService()
     safety_evaluator = SafetyEvaluator()
     expl_svc = ExplainabilityIntegrationService()
 

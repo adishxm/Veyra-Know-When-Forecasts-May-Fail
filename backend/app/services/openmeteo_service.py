@@ -220,94 +220,126 @@ class OpenMeteoGEFSWeatherService(BaseWeatherService):
             "precipitation": ("precipitation", "mm"),
         }
 
-        # Pre-scan member column keys in hourly payload for each source variable
-        # GEFS ensemble members in Open-Meteo are named e.g. 'temperature_2m_member01' .. 'temperature_2m_member30'
-        var_member_cols: dict[str, list[str]] = {}
-        for src_var in var_mapping:
-            m_keys = sorted([k for k in hourly.keys() if k.startswith(f"{src_var}_member")])
-            var_member_cols[src_var] = m_keys
-
         # Pre-compute issue datetime once outside the loop
         try:
             dt_issue = datetime.fromisoformat(issue_time_iso.replace("Z", "+00:00"))
         except Exception:
             dt_issue = datetime.now(timezone.utc)
 
+        # Pre-parse valid timestamps and lead hours
+        valid_time_isos: list[str] = []
+        lead_hours_list: list[int] = []
         for i, valid_time_str in enumerate(times):
             try:
                 valid_dt = datetime.fromisoformat(valid_time_str)
                 valid_time_iso = valid_dt.isoformat() + "Z"
                 if valid_dt.tzinfo is None:
                     valid_dt = valid_dt.replace(tzinfo=timezone.utc)
-                lead_hours = max(0, int((valid_dt - dt_issue).total_seconds() // 3600))
+                lead_h = max(0, int((valid_dt - dt_issue).total_seconds() // 3600))
             except Exception:
                 valid_time_iso = valid_time_str
-                lead_hours = i
+                lead_h = i
+            valid_time_isos.append(valid_time_iso)
+            lead_hours_list.append(lead_h)
 
+        # Pre-compute vectorized statistics across all timesteps for each variable
+        n_times = len(times)
+        var_stats: dict[str, dict[str, Any]] = {}
+        for src_var, (canon_var, canon_unit) in var_mapping.items():
+            if src_var not in hourly:
+                continue
+            vals = hourly[src_var]
+            val_floats = [float(v) if v is not None else None for v in vals]
+            m_keys = sorted([k for k in hourly.keys() if k.startswith(f"{src_var}_member")])
+
+            if m_keys:
+                all_series = []
+                all_series.append([float(v) if v is not None else np.nan for v in vals])
+                for mk in m_keys:
+                    ms = hourly.get(mk, [])
+                    all_series.append([float(v) if v is not None else np.nan for v in ms])
+
+                arr = np.array(all_series, dtype=float)
+                member_counts = np.sum(~np.isnan(arr), axis=0)
+                means = np.nanmean(arr, axis=0)
+                stds = np.where(member_counts > 1, np.nanstd(arr, axis=0, ddof=1), 0.0)
+                mins = np.nanmin(arr, axis=0)
+                maxs = np.nanmax(arr, axis=0)
+                q10s = np.nanpercentile(arr, 10, axis=0)
+                q90s = np.nanpercentile(arr, 90, axis=0)
+
+                var_stats[src_var] = {
+                    "vals": val_floats,
+                    "member_count": member_counts,
+                    "means": means,
+                    "stds": stds,
+                    "mins": mins,
+                    "maxs": maxs,
+                    "q10s": q10s,
+                    "q90s": q90s,
+                    "has_members": True,
+                }
+            else:
+                var_stats[src_var] = {
+                    "vals": val_floats,
+                    "member_count": [31] * n_times,
+                    "means": val_floats,
+                    "stds": [None] * n_times,
+                    "mins": val_floats,
+                    "maxs": val_floats,
+                    "q10s": val_floats,
+                    "q90s": val_floats,
+                    "has_members": False,
+                }
+
+        for i in range(n_times):
+            vt_iso = valid_time_isos[i]
+            lh = lead_hours_list[i]
             for src_var, (canon_var, canon_unit) in var_mapping.items():
-                if src_var in hourly:
-                    vals = hourly[src_var]
-                    if i < len(vals):
-                        raw_val = vals[i]
-                        val_float = float(raw_val) if raw_val is not None else None
+                if src_var not in var_stats:
+                    continue
+                st = var_stats[src_var]
+                if i >= len(st["vals"]):
+                    continue
+                vf = st["vals"][i]
+                if st["has_members"]:
+                    nm = int(st["member_count"][i])
+                    em = float(st["means"][i]) if not np.isnan(st["means"][i]) else None
+                    es = float(st["stds"][i]) if not np.isnan(st["stds"][i]) else None
+                    emin = float(st["mins"][i]) if not np.isnan(st["mins"][i]) else None
+                    emax = float(st["maxs"][i]) if not np.isnan(st["maxs"][i]) else None
+                    eq10 = float(st["q10s"][i]) if not np.isnan(st["q10s"][i]) else None
+                    eq90 = float(st["q90s"][i]) if not np.isnan(st["q90s"][i]) else None
+                else:
+                    nm = 31
+                    em = vf
+                    es = None
+                    emin = vf
+                    emax = vf
+                    eq10 = vf
+                    eq90 = vf
 
-                        # Collect valid ensemble member values
-                        m_keys = var_member_cols.get(src_var, [])
-                        member_vals: list[float] = []
-                        if m_keys:
-                            # Include control forecast member if valid
-                            if val_float is not None:
-                                member_vals.append(val_float)
-                            for mk in m_keys:
-                                m_series = hourly.get(mk, [])
-                                if i < len(m_series) and m_series[i] is not None:
-                                    try:
-                                        mv = float(m_series[i])
-                                        if not np.isnan(mv):
-                                            member_vals.append(mv)
-                                    except (ValueError, TypeError):
-                                        pass
-
-                        if member_vals:
-                            n_members = len(member_vals)
-                            m_arr = np.array(member_vals, dtype=float)
-                            ens_mean = float(np.mean(m_arr))
-                            ens_std = float(np.std(m_arr, ddof=1)) if n_members > 1 else 0.0
-                            ens_min = float(np.min(m_arr))
-                            ens_max = float(np.max(m_arr))
-                            ens_q10 = float(np.percentile(m_arr, 10))
-                            ens_q90 = float(np.percentile(m_arr, 90))
-                        else:
-                            # Upstream provided no ensemble member arrays
-                            n_members = 31  # Nominal GEFS member count fallback for backward compatibility
-                            ens_mean = val_float
-                            ens_std = None  # Genuine missing ensemble: DO NOT fabricate fake 0.0
-                            ens_min = val_float
-                            ens_max = val_float
-                            ens_q10 = val_float
-                            ens_q90 = val_float
-
-                        record = CanonicalForecastRecord(
-                            location=location,
-                            latitude=latitude,
-                            longitude=longitude,
-                            elevation=elevation,
-                            issue_time=issue_time_iso,
-                            valid_time=valid_time_iso,
-                            lead_hours=lead_hours,
-                            variable=canon_var,
-                            unit=canon_unit,
-                            value=val_float,
-                            source="NOAA_GEFS_OPENMETEO",
-                            member_count=n_members,
-                            ensemble_mean=ens_mean,
-                            ensemble_std=ens_std,
-                            ensemble_min=ens_min,
-                            ensemble_max=ens_max,
-                            q10=ens_q10,
-                            q90=ens_q90,
-                        )
-                        records.append(record)
+                record = CanonicalForecastRecord(
+                    location=location,
+                    latitude=latitude,
+                    longitude=longitude,
+                    elevation=elevation,
+                    issue_time=issue_time_iso,
+                    valid_time=vt_iso,
+                    lead_hours=lh,
+                    variable=canon_var,
+                    unit=canon_unit,
+                    value=vf,
+                    source="NOAA_GEFS_OPENMETEO",
+                    member_count=nm,
+                    ensemble_mean=em,
+                    ensemble_std=es,
+                    ensemble_min=emin,
+                    ensemble_max=emax,
+                    q10=eq10,
+                    q90=eq90,
+                )
+                records.append(record)
 
         return records
 
@@ -381,7 +413,10 @@ class OpenMeteoGEFSWeatherService(BaseWeatherService):
         return result
 
     def get_forecast(
-        self, location: str, target_date: Optional[str] = None
+        self,
+        location: str,
+        target_date: Optional[str] = None,
+        forecast_days: Optional[int] = None,
     ) -> WeatherResult:
         """Fetch live or mocked forecast data, validate QC, and return standardized WeatherResult."""
         coords = self.resolve_coordinates(location)
@@ -398,7 +433,8 @@ class OpenMeteoGEFSWeatherService(BaseWeatherService):
             )
 
         latitude, longitude = coords
-        query_url = self.build_query_url(latitude, longitude, target_date)
+        f_days = forecast_days if forecast_days is not None else 16
+        query_url = self.build_query_url(latitude, longitude, target_date, forecast_days=f_days)
 
         try:
             raw_data = self._fetch_raw_forecast(query_url)

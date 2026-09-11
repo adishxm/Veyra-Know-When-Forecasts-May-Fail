@@ -54,7 +54,10 @@ class BaseWeatherService(ABC):
 
     @abstractmethod
     def get_forecast(
-        self, location: str, target_date: Optional[str] = None
+        self,
+        location: str,
+        target_date: Optional[str] = None,
+        forecast_days: Optional[int] = None,
     ) -> WeatherResult:
         """Fetch raw forecast and atmospheric data for a given location."""
         pass
