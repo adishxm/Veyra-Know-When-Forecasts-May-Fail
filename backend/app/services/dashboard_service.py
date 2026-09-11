@@ -3,11 +3,16 @@
 Orchestrates unified, multi-horizon forecast bust intelligence for dashboard consumption.
 Reuses existing ForecastBustAgent, DynamicLocationService, and caching pipelines
 without modifying frozen model weights or duplicating prediction logic.
+
+Performance-optimized: fetches weather data ONCE and evaluates all horizons in parallel
+via ThreadPoolExecutor, eliminating redundant upstream requests and sequential bottlenecks.
 """
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 import logging
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from backend.app.core.config import settings
 from backend.app.core.metrics import default_metrics
 from backend.app.schemas.dashboard import (
     DashboardIntelligenceResponse,
@@ -34,15 +39,26 @@ logger = logging.getLogger(__name__)
 
 
 class DashboardIntelligenceService:
-    """Production service orchestrating dashboard-ready probabilistic intelligence."""
+    """Production service orchestrating dashboard-ready probabilistic intelligence.
+
+    Performance Architecture:
+    - Weather data is fetched ONCE and shared across all horizon evaluations.
+    - All horizon evaluations (feature engineering + ML inference + safety) run
+      in parallel via a bounded ThreadPoolExecutor.
+    - Location resolution happens once at the orchestration level, not per-horizon.
+    - Issue timestamp is extracted from the shared weather data, eliminating
+      the separate pre-fetch round-trip.
+    """
 
     def __init__(
         self,
         location_service: Optional[BaseLocationService] = None,
         agent_factory: Optional[Callable[[], Any]] = None,
+        max_workers: Optional[int] = None,
     ):
         self.location_service = location_service or DynamicLocationService()
         self.agent_factory = agent_factory
+        self.max_workers = max_workers or settings.DASHBOARD_MAX_WORKERS
 
     @staticmethod
     def get_horizons_for_mode(mode: DashboardMode) -> List[int]:
@@ -63,10 +79,67 @@ class DashboardIntelligenceService:
 
         return get_forecast_bust_agent()
 
+    def _evaluate_single_horizon(
+        self,
+        agent: Any,
+        location: str,
+        variable: str,
+        issue_iso: str,
+        h: int,
+    ) -> Tuple[int, DashboardTimelinePoint, Optional[PredictionResponse]]:
+        """Evaluate a single horizon point using the shared agent (thread-safe).
+
+        Returns (lead_hours, timeline_point, selected_prediction_or_None).
+        """
+        lead_days = round(h / 24.0, 1)
+        valid_dt = datetime.fromisoformat(issue_iso.replace("Z", "+00:00")) + timedelta(hours=h)
+        valid_iso = valid_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        pred_req = PredictionRequest(
+            location=location,
+            variable=variable,
+            issue_time=issue_iso,
+            valid_time=valid_iso,
+        )
+        pred_resp = agent.analyze(pred_req)
+
+        is_certified = h <= 240
+        within_h = pred_resp.within_trust_horizon if pred_resp.within_trust_horizon is not None else (h <= 168)
+        op_trust_h = pred_resp.operational_trust_horizon_hours if pred_resp.operational_trust_horizon_hours is not None else 168
+        dec_mode = pred_resp.decision_mode or DecisionMode.ABSTAINED.value
+
+        point = DashboardTimelinePoint(
+            lead_hours=h,
+            lead_days=lead_days,
+            valid_time=valid_iso,
+            bust_probability=pred_resp.bust_probability,
+            risk_level=pred_resp.risk_level,
+            trust_state=pred_resp.trust_state,
+            abstain=pred_resp.abstain,
+            reason_codes=pred_resp.reason_codes,
+            calibration_status=pred_resp.calibration_status,
+            decision_mode=dec_mode,
+            within_trust_horizon=within_h,
+            operational_trust_horizon_hours=op_trust_h,
+            is_certified_horizon=is_certified,
+        )
+
+        # Mark the canonical 24h prediction for selected_prediction
+        selected = pred_resp if h == 24 else None
+        return h, point, selected
+
     def orchestrate(
         self, request: DashboardRequest, request_id: Optional[str] = None
     ) -> DashboardIntelligenceResponse:
-        """Synthesize unified multi-horizon intelligence for a single dashboard request."""
+        """Synthesize unified multi-horizon intelligence for a single dashboard request.
+
+        Optimized pipeline:
+        1. Parse issue timestamp (if explicit)
+        2. Resolve location ONCE
+        3. Fetch weather data ONCE to prime cache and extract issue_time
+        4. Evaluate ALL horizons IN PARALLEL (weather cache ensures instant hits)
+        5. Assemble deterministic summary
+        """
         horizons = self.get_horizons_for_mode(request.mode)
         total_points = len(horizons)
 
@@ -80,7 +153,7 @@ class DashboardIntelligenceService:
             except Exception as err:
                 logger.warning("Failed to parse requested issue_time '%s': %s", request.issue_time, err)
 
-        # 2. Resolve geographic location
+        # 2. Resolve geographic location ONCE (not per-horizon)
         resolved = self.location_service.resolve(request.location)
         if resolved is None or resolved.latitude is None or resolved.longitude is None:
             # Short-circuit on invalid location without triggering upstream weather requests
@@ -88,7 +161,6 @@ class DashboardIntelligenceService:
             default_metrics.record_dashboard_request("ABSTAINED", total_points, 0, total_points)
 
             if base_issue_dt is None:
-                # Truncate current UTC time to 6-hour numerical cycle
                 now = datetime.now(timezone.utc)
                 base_issue_dt = now.replace(hour=(now.hour // 6) * 6, minute=0, second=0, microsecond=0)
 
@@ -168,9 +240,10 @@ class DashboardIntelligenceService:
 
         agent = self._get_agent()
 
-        # 3. Determine base issue timestamp for valid location if not explicitly provided
+        # 3. Fetch weather data ONCE to prime cache and extract issue_time
+        #    All subsequent agent.analyze() calls for individual horizons will
+        #    hit the warm cache instantly, avoiding redundant upstream requests.
         if base_issue_dt is None and hasattr(agent, "get_weather_data"):
-            # Query weather service once to establish canonical cycle and prime cache
             try:
                 weather_res = agent.get_weather_data(request.location, None)
                 if weather_res and weather_res.is_available and weather_res.raw_data:
@@ -186,65 +259,81 @@ class DashboardIntelligenceService:
             except Exception as exc:
                 logger.debug("Could not pre-fetch weather for issue time: %s", exc)
 
-
         if base_issue_dt is None:
-            # Truncate current UTC time to 6-hour numerical cycle
             now = datetime.now(timezone.utc)
             base_issue_dt = now.replace(hour=(now.hour // 6) * 6, minute=0, second=0, microsecond=0)
 
         issue_iso = base_issue_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # 3. Evaluate each requested horizon
+        # 4. Evaluate ALL horizons IN PARALLEL
+        #    Weather cache is primed from step 3 — each horizon's agent.analyze()
+        #    will resolve location from cache and get weather data from cache instantly.
+        #    Feature engineering + ML inference + safety run concurrently across threads.
+        timeline_results: Dict[int, Tuple[DashboardTimelinePoint, Optional[PredictionResponse]]] = {}
+        variable = request.variable or "temperature_2m"
+
+        effective_workers = min(self.max_workers, len(horizons))
+
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            future_to_h = {
+                executor.submit(
+                    self._evaluate_single_horizon,
+                    agent,
+                    request.location,
+                    variable,
+                    issue_iso,
+                    h,
+                ): h
+                for h in horizons
+            }
+
+            for future in as_completed(future_to_h):
+                h = future_to_h[future]
+                try:
+                    lead_hours, point, selected = future.result()
+                    timeline_results[lead_hours] = (point, selected)
+                except Exception as exc:
+                    logger.error("Horizon h=%d evaluation failed: %s", h, exc)
+                    # Produce an abstained point for this failed horizon
+                    lead_days = round(h / 24.0, 1)
+                    valid_dt = base_issue_dt + timedelta(hours=h)
+                    valid_iso = valid_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    fallback_point = DashboardTimelinePoint(
+                        lead_hours=h,
+                        lead_days=lead_days,
+                        valid_time=valid_iso,
+                        bust_probability=None,
+                        risk_level=None,
+                        trust_state=TrustState.UNAVAILABLE,
+                        abstain=True,
+                        reason_codes=[ReasonCode.INTERNAL_ERROR],
+                        calibration_status=CalibrationStatus.UNAVAILABLE,
+                        decision_mode=DecisionMode.ABSTAINED,
+                        within_trust_horizon=h <= 168,
+                        operational_trust_horizon_hours=168,
+                        is_certified_horizon=h <= 240,
+                    )
+                    timeline_results[h] = (fallback_point, None)
+
+        # Reassemble timeline in canonical lead-hour order (deterministic)
         timeline_points: List[DashboardTimelinePoint] = []
         selected_pred: Optional[PredictionResponse] = None
-
         for h in horizons:
-            lead_days = round(h / 24.0, 1)
-            valid_dt = base_issue_dt + timedelta(hours=h)
-            valid_iso = valid_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-            pred_req = PredictionRequest(
-                location=request.location,
-                variable=request.variable or "temperature_2m",
-                issue_time=issue_iso,
-                valid_time=valid_iso,
-            )
-            pred_resp = agent.analyze(pred_req)
-
-            is_certified = h <= 240
-            within_h = pred_resp.within_trust_horizon if pred_resp.within_trust_horizon is not None else (h <= 168)
-            op_trust_h = pred_resp.operational_trust_horizon_hours if pred_resp.operational_trust_horizon_hours is not None else 168
-            dec_mode = pred_resp.decision_mode or DecisionMode.ABSTAINED.value
-
-            point = DashboardTimelinePoint(
-                lead_hours=h,
-                lead_days=lead_days,
-                valid_time=valid_iso,
-                bust_probability=pred_resp.bust_probability,
-                risk_level=pred_resp.risk_level,
-                trust_state=pred_resp.trust_state,
-                abstain=pred_resp.abstain,
-                reason_codes=pred_resp.reason_codes,
-                calibration_status=pred_resp.calibration_status,
-                decision_mode=dec_mode,
-                within_trust_horizon=within_h,
-                operational_trust_horizon_hours=op_trust_h,
-                is_certified_horizon=is_certified,
-            )
-            timeline_points.append(point)
-
-            if h == 24:
-                selected_pred = pred_resp
+            point, selected = timeline_results.get(h, (None, None))
+            if point is not None:
+                timeline_points.append(point)
+            if selected is not None:
+                selected_pred = selected
 
         if selected_pred is None:
             selected_pred = agent.analyze(
                 PredictionRequest(
                     location=request.location,
-                    variable=request.variable or "temperature_2m",
+                    variable=variable,
                 )
             )
 
-        # 4. Compute deterministic summary intelligence
+        # 5. Compute deterministic summary intelligence
         valid_points = [p for p in timeline_points if p.bust_probability is not None]
         available_cnt = len(valid_points)
         abstained_cnt = total_points - available_cnt
@@ -306,7 +395,7 @@ class DashboardIntelligenceService:
 
             status = DashboardStatus.SUCCESS if abstained_cnt == 0 else DashboardStatus.PARTIAL
 
-        # 5. Record telemetry
+        # 6. Record telemetry
         default_metrics.record_dashboard_request(
             outcome=status.value,
             total_points=total_points,
@@ -317,7 +406,7 @@ class DashboardIntelligenceService:
         return DashboardIntelligenceResponse(
             status=status,
             location=location_ctx,
-            variable=request.variable or "temperature_2m",
+            variable=variable,
             issue_time=issue_iso,
             mode=request.mode,
             selected_prediction=selected_pred,

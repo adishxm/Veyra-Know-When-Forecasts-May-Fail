@@ -31,7 +31,7 @@ class Settings(BaseModel):
         default_factory=lambda: int(os.getenv("GEOCODING_TIMEOUT_SECONDS", "10"))
     )
     WEATHER_TIMEOUT_SECONDS: int = Field(
-        default_factory=lambda: int(os.getenv("WEATHER_TIMEOUT_SECONDS", "25"))
+        default_factory=lambda: int(os.getenv("WEATHER_TIMEOUT_SECONDS", "15"))
     )
     HISTORICAL_TIMEOUT_SECONDS: int = Field(
         default_factory=lambda: int(os.getenv("HISTORICAL_TIMEOUT_SECONDS", "15"))
@@ -107,6 +107,11 @@ class Settings(BaseModel):
     # Multi-location Batch limits
     MAX_MULTI_LOCATION_BATCH_SIZE: int = Field(
         default_factory=lambda: int(os.getenv("MAX_MULTI_LOCATION_BATCH_SIZE", "50"))
+    )
+
+    # Dashboard Intelligence Parallel Evaluation
+    DASHBOARD_MAX_WORKERS: int = Field(
+        default_factory=lambda: int(os.getenv("DASHBOARD_MAX_WORKERS", "8"))
     )
 
     # Server & Deployment Configuration

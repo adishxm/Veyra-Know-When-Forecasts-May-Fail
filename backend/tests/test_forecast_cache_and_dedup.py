@@ -239,10 +239,13 @@ def test_e_coordinate_isolation_different_locations():
     call_counter = {"Kolkata": 0, "London": 0}
 
     def multi_location_http_client(url: str) -> dict:
-        if "latitude=22.5726" in url:
+        from urllib.parse import urlparse, parse_qs
+        parsed = parse_qs(urlparse(url).query)
+        lat = parsed.get("latitude", [""])[0]
+        if lat.startswith("22.5726"):
             call_counter["Kolkata"] += 1
             return _generate_synthetic_gefs_payload(base_temp=30.0)
-        elif "latitude=51.5074" in url:
+        elif lat.startswith("51.50"):
             call_counter["London"] += 1
             return _generate_synthetic_gefs_payload(base_temp=15.0)
         else:

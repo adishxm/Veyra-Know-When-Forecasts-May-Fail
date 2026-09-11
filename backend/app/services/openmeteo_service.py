@@ -140,10 +140,18 @@ class OpenMeteoGEFSWeatherService(BaseWeatherService):
         target_date: Optional[str] = None,
         forecast_days: int = 16,
     ) -> str:
-        """Construct the Open-Meteo GEFS ensemble query URL."""
+        """Construct the Open-Meteo GEFS ensemble query URL with normalized parameters.
+
+        Lat/lon are rounded to 4 decimal places (~11m precision) to maximize
+        cache hit rates when the same location is queried with slightly different precision.
+        """
+        # Normalize coordinates for consistent cache keys
+        norm_lat = round(latitude, 4)
+        norm_lon = round(longitude, 4)
+
         params: dict[str, str] = {
-            "latitude": str(latitude),
-            "longitude": str(longitude),
+            "latitude": str(norm_lat),
+            "longitude": str(norm_lon),
             "hourly": "temperature_2m,surface_pressure,wind_speed_10m,relative_humidity_2m,precipitation",
             "models": "gfs_seamless",
             "timezone": "UTC",
@@ -155,7 +163,9 @@ class OpenMeteoGEFSWeatherService(BaseWeatherService):
         else:
             params["forecast_days"] = str(forecast_days)
 
-        return f"{self.api_url}?{urllib.parse.urlencode(params)}"
+        # Sort parameters for deterministic URL (maximizes cache hit rate)
+        sorted_params = sorted(params.items())
+        return f"{self.api_url}?{urllib.parse.urlencode(sorted_params)}"
 
     def parse_canonical_records(
         self,
