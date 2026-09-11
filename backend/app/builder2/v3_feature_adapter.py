@@ -70,22 +70,32 @@ class Builder2V3FeatureAdapter(BaseFeatureService):
                 error="Weather result contains zero parseable forecast records",
             )
 
-        # 2. Extract 50-feature DataFrame
+        # 2. Extract 50-feature DataFrame (cached on weather_result for multi-horizon reuse)
         target_var = weather_result.metadata.get("variable", "temperature_2m") if weather_result.metadata else "temperature_2m"
-        try:
-            X, meta_rows = self.pipeline.extract_from_records(
-                raw_records, target_variable=target_var
-            )
-        except Exception as exc:
-            logger.error("V3 feature extraction error: %s", exc)
-            return FeatureResult(
-                location=weather_result.location,
-                features={},
-                feature_names=[],
-                is_ready=False,
-                metadata={"status": ReasonCode.FEATURES_NOT_READY.value},
-                error=f"V3 feature pipeline failed: {exc}",
-            )
+        cache_key = f"_v3_cache_{target_var}"
+        cached_features = getattr(weather_result, cache_key, None)
+        if cached_features is not None:
+            X, meta_rows = cached_features
+        else:
+            try:
+                X, meta_rows = self.pipeline.extract_from_records(
+                    raw_records, target_variable=target_var
+                )
+                if not X.empty:
+                    try:
+                        setattr(weather_result, cache_key, (X, meta_rows))
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.error("V3 feature extraction error: %s", exc)
+                return FeatureResult(
+                    location=weather_result.location,
+                    features={},
+                    feature_names=[],
+                    is_ready=False,
+                    metadata={"status": ReasonCode.FEATURES_NOT_READY.value},
+                    error=f"V3 feature pipeline failed: {exc}",
+                )
 
         if X.empty:
             return FeatureResult(

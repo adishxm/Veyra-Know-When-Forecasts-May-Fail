@@ -281,7 +281,11 @@ class ForecastBustAgent:
             issue_time=evaluated_issue,
         )
 
-    def analyze(self, request: PredictionRequest) -> PredictionResponse:
+    def analyze(
+        self,
+        request: PredictionRequest,
+        weather_result: Optional[WeatherResult] = None,
+    ) -> PredictionResponse:
         """Main entry point orchestrating the end-to-end evaluation pipeline with operational telemetry.
 
         Short-circuits safely whenever a dependency is unavailable:
@@ -295,7 +299,25 @@ class ForecastBustAgent:
             location, target_date = self.resolve_request(request)
 
             # 2. Weather Data Collection Stage
-            weather_result = self.get_weather_data(location, target_date)
+            if weather_result is None:
+                weather_result = self.get_weather_data(location, target_date)
+            else:
+                # Thread-safe shallow copy with request-specific metadata
+                weather_eval = WeatherResult(
+                    location=weather_result.location or location,
+                    target_date=target_date or weather_result.target_date,
+                    raw_data=weather_result.raw_data,
+                    data_version=weather_result.data_version,
+                    is_available=weather_result.is_available,
+                    quality_flags=weather_result.quality_flags,
+                    metadata=dict(weather_result.metadata or {}),
+                    error=weather_result.error,
+                )
+                for attr in dir(weather_result):
+                    if attr.startswith("_v3_cache_"):
+                        setattr(weather_eval, attr, getattr(weather_result, attr))
+                weather_result = weather_eval
+
             if not weather_result.is_available or weather_result.error:
                 safety_assessment = self.apply_safety(weather_result=weather_result)
                 resp = self.build_response(

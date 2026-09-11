@@ -1,10 +1,12 @@
 """Real Weather Ingestion Service using Open-Meteo GEFS / GFS public ensemble API."""
 import copy
+import gzip
 import json
 import logging
 import time
 import urllib.parse
 import urllib.request
+import zlib
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 import numpy as np
@@ -105,17 +107,27 @@ class OpenMeteoGEFSWeatherService(BaseWeatherService):
 
 
     def _default_http_client(self, url: str) -> dict[str, Any]:
-        """Perform HTTP GET request using standard library urllib with bounded retry and backoff."""
+        """Perform HTTP GET request using standard library urllib with bounded retry, backoff, and gzip decompression."""
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "Veyra-Forecast-Bust-Sentinel/0.1.0"},
+            headers={
+                "User-Agent": "Veyra-Forecast-Bust-Sentinel/0.1.0",
+                "Accept-Encoding": "gzip, deflate",
+            },
         )
 
         def _do_fetch() -> dict[str, Any]:
             with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:
                 if response.status != 200:
                     raise RuntimeError(f"HTTP error {response.status} fetching forecast data")
-                payload = response.read().decode("utf-8")
+                raw_bytes = response.read()
+                encoding = response.headers.get("Content-Encoding", "").lower()
+                if "gzip" in encoding:
+                    payload = gzip.decompress(raw_bytes).decode("utf-8")
+                elif "deflate" in encoding:
+                    payload = zlib.decompress(raw_bytes).decode("utf-8")
+                else:
+                    payload = raw_bytes.decode("utf-8")
                 return json.loads(payload)
 
         return execute_with_retry(
@@ -215,19 +227,21 @@ class OpenMeteoGEFSWeatherService(BaseWeatherService):
             m_keys = sorted([k for k in hourly.keys() if k.startswith(f"{src_var}_member")])
             var_member_cols[src_var] = m_keys
 
+        # Pre-compute issue datetime once outside the loop
+        try:
+            dt_issue = datetime.fromisoformat(issue_time_iso.replace("Z", "+00:00"))
+        except Exception:
+            dt_issue = datetime.now(timezone.utc)
+
         for i, valid_time_str in enumerate(times):
             try:
                 valid_dt = datetime.fromisoformat(valid_time_str)
                 valid_time_iso = valid_dt.isoformat() + "Z"
+                if valid_dt.tzinfo is None:
+                    valid_dt = valid_dt.replace(tzinfo=timezone.utc)
+                lead_hours = max(0, int((valid_dt - dt_issue).total_seconds() // 3600))
             except Exception:
                 valid_time_iso = valid_time_str
-
-            # Strict lead hours calculation
-            try:
-                dt_issue = datetime.fromisoformat(issue_time_iso.replace("Z", "+00:00"))
-                dt_valid = datetime.fromisoformat(valid_time_iso.replace("Z", "+00:00"))
-                lead_hours = max(0, int((dt_valid - dt_issue).total_seconds() / 3600))
-            except Exception:
                 lead_hours = i
 
             for src_var, (canon_var, canon_unit) in var_mapping.items():
@@ -318,7 +332,7 @@ class OpenMeteoGEFSWeatherService(BaseWeatherService):
             cached = self.cache.get(query_url)
             if cached is not None:
                 logger.debug("event=cache_hit component=openmeteo_service query_url=%s", query_url)
-                return copy.deepcopy(cached)
+                return dict(cached)
             else:
                 logger.debug("event=cache_miss component=openmeteo_service query_url=%s", query_url)
         elif not self.enable_cache:
@@ -330,7 +344,7 @@ class OpenMeteoGEFSWeatherService(BaseWeatherService):
             if self.enable_cache and self.cache is not None:
                 cached = self.cache.get(query_url)
                 if cached is not None:
-                    return copy.deepcopy(cached)
+                    return dict(cached)
 
             start_t = time.perf_counter()
             try:
@@ -364,7 +378,7 @@ class OpenMeteoGEFSWeatherService(BaseWeatherService):
         else:
             result = _do_fetch()
 
-        return copy.deepcopy(result)
+        return result
 
     def get_forecast(
         self, location: str, target_date: Optional[str] = None

@@ -86,6 +86,7 @@ class DashboardIntelligenceService:
         variable: str,
         issue_iso: str,
         h: int,
+        weather_res: Optional[Any] = None,
     ) -> Tuple[int, DashboardTimelinePoint, Optional[PredictionResponse]]:
         """Evaluate a single horizon point using the shared agent (thread-safe).
 
@@ -101,7 +102,10 @@ class DashboardIntelligenceService:
             issue_time=issue_iso,
             valid_time=valid_iso,
         )
-        pred_resp = agent.analyze(pred_req)
+        try:
+            pred_resp = agent.analyze(pred_req, weather_result=weather_res)
+        except TypeError:
+            pred_resp = agent.analyze(pred_req)
 
         is_certified = h <= 240
         within_h = pred_resp.within_trust_horizon if pred_resp.within_trust_horizon is not None else (h <= 168)
@@ -240,15 +244,16 @@ class DashboardIntelligenceService:
 
         agent = self._get_agent()
 
-        # 3. Fetch weather data ONCE to prime cache and extract issue_time
-        #    All subsequent agent.analyze() calls for individual horizons will
-        #    hit the warm cache instantly, avoiding redundant upstream requests.
-        if base_issue_dt is None and hasattr(agent, "get_weather_data"):
+        # 3. Fetch weather data ONCE upfront
+        #    WeatherResult is shared across all horizon workers, eliminating
+        #    redundant upstream network calls, geocoding lookups, and JSON parsing.
+        weather_res: Optional[Any] = None
+        if hasattr(agent, "get_weather_data"):
             try:
                 weather_res = agent.get_weather_data(request.location, None)
                 if weather_res and weather_res.is_available and weather_res.raw_data:
                     raw_records = weather_res.raw_data.get("records", [])
-                    if raw_records:
+                    if raw_records and base_issue_dt is None:
                         first_issue = raw_records[0].get("issue_time")
                         if first_issue:
                             try:
@@ -257,7 +262,7 @@ class DashboardIntelligenceService:
                             except Exception:
                                 pass
             except Exception as exc:
-                logger.debug("Could not pre-fetch weather for issue time: %s", exc)
+                logger.debug("Could not pre-fetch weather: %s", exc)
 
         if base_issue_dt is None:
             now = datetime.now(timezone.utc)
@@ -265,9 +270,7 @@ class DashboardIntelligenceService:
 
         issue_iso = base_issue_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # 4. Evaluate ALL horizons IN PARALLEL
-        #    Weather cache is primed from step 3 — each horizon's agent.analyze()
-        #    will resolve location from cache and get weather data from cache instantly.
+        # 4. Evaluate ALL horizons IN PARALLEL with shared weather_res
         #    Feature engineering + ML inference + safety run concurrently across threads.
         timeline_results: Dict[int, Tuple[DashboardTimelinePoint, Optional[PredictionResponse]]] = {}
         variable = request.variable or "temperature_2m"
@@ -283,6 +286,7 @@ class DashboardIntelligenceService:
                     variable,
                     issue_iso,
                     h,
+                    weather_res,
                 ): h
                 for h in horizons
             }
@@ -326,12 +330,14 @@ class DashboardIntelligenceService:
                 selected_pred = selected
 
         if selected_pred is None:
-            selected_pred = agent.analyze(
-                PredictionRequest(
-                    location=request.location,
-                    variable=variable,
-                )
+            fallback_req = PredictionRequest(
+                location=request.location,
+                variable=variable,
             )
+            try:
+                selected_pred = agent.analyze(fallback_req, weather_result=weather_res)
+            except TypeError:
+                selected_pred = agent.analyze(fallback_req)
 
         # 5. Compute deterministic summary intelligence
         valid_points = [p for p in timeline_points if p.bust_probability is not None]
