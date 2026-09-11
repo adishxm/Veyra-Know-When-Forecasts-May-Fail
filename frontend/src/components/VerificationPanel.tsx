@@ -31,11 +31,13 @@ export const VerificationPanel: React.FC<VerificationPanelProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'overview' | 'explainability' | 'conformal' | 'evidence'>('overview');
 
+  // Distinguish between initial standby (awaiting audit) and evaluated telemetry (nominal or abstained)
+  const isStandby = !selectedPoint && !prediction;
+
   // Active point evaluation context (either selected timeline point or base prediction)
-  const isAbstain = Boolean(
+  const isAbstain = !isStandby && Boolean(
     (selectedPoint && (selectedPoint.abstain || selectedPoint.bust_probability === null)) ||
-    (!selectedPoint && prediction && (prediction.abstain || prediction.bust_probability === null)) ||
-    (!selectedPoint && !prediction)
+    (!selectedPoint && prediction && (prediction.abstain || prediction.bust_probability === null))
   );
 
   const activeProb = selectedPoint
@@ -47,25 +49,31 @@ export const VerificationPanel: React.FC<VerificationPanelProps> = ({
   const probDisplay =
     activeProb !== null && activeProb !== undefined
       ? `${(activeProb * 100).toFixed(2)}%`
+      : isStandby
+      ? 'STANDBY'
       : 'ABSTAINED';
 
   const riskLevel = selectedPoint
     ? selectedPoint.risk_level || (isAbstain ? 'ABSTAIN' : 'LOW')
     : prediction
     ? prediction.risk_level || (isAbstain ? 'ABSTAIN' : 'LOW')
+    : isStandby
+    ? 'STANDBY'
     : 'ABSTAIN';
 
   const trustState = selectedPoint
     ? selectedPoint.trust_state
     : prediction
     ? prediction.trust_state
+    : isStandby
+    ? 'STANDBY'
     : 'UNAVAILABLE';
 
   const reasonCodes = selectedPoint
     ? selectedPoint.reason_codes
     : prediction
     ? prediction.reason_codes
-    : ['STANDBY'];
+    : [];
 
   const confidenceIndex =
     prediction?.confidence_index !== null && prediction?.confidence_index !== undefined
@@ -88,7 +96,11 @@ export const VerificationPanel: React.FC<VerificationPanelProps> = ({
       ? prediction.failure_fingerprint
       : prediction?.failure_fingerprint?.label ||
         prediction?.failure_fingerprint?.group ||
-        (isAbstain ? 'OUT_OF_DOMAIN_OR_VOLATILE' : 'STABLE_SYNOPTIC_CONSENSUS');
+        (isStandby
+          ? 'STANDBY_AWAITING_AUDIT'
+          : isAbstain
+          ? 'OUT_OF_DOMAIN_OR_VOLATILE'
+          : 'STABLE_SYNOPTIC_CONSENSUS');
 
   const explanation = prediction?.explanation;
   const leadHours = selectedPoint ? selectedPoint.lead_hours : 24;
@@ -100,6 +112,7 @@ export const VerificationPanel: React.FC<VerificationPanelProps> = ({
       case 'HIGH': return 'var(--risk-high)';
       case 'MEDIUM': return 'var(--risk-med)';
       case 'LOW': return 'var(--risk-low)';
+      case 'STANDBY': return 'var(--noaa-muted)';
       default: return 'var(--trust-abstain)';
     }
   };
@@ -145,7 +158,19 @@ export const VerificationPanel: React.FC<VerificationPanelProps> = ({
         </div>
       )}
 
-      {/* Abstention Banner (shown when model abstains or location is unresolvable) */}
+      {/* Standby Notice (shown when awaiting initial audit execution) */}
+      {isStandby && (
+        <div className="standby-notice-card" role="status" aria-label="Awaiting Reliability Audit">
+          <div className="standby-notice-header">
+            <Info size={16} /> Telemetry Standby &bull; Awaiting Reliability Audit
+          </div>
+          <div className="standby-notice-text">
+            Click <strong>&quot;Audit Reliability&quot;</strong> to evaluate multi-horizon forecast bust risk, conformal trust boundaries, and TreeSHAP failure fingerprints for <strong>{locationQuery || 'the requested target'}</strong>.
+          </div>
+        </div>
+      )}
+
+      {/* Abstention Banner (shown ONLY when model safely abstains) */}
       {isAbstain && (
         <div className="abstention-box" role="alert">
           <div className="abstention-title">
@@ -190,21 +215,36 @@ export const VerificationPanel: React.FC<VerificationPanelProps> = ({
       {/* Failure Fingerprint Card */}
       <div className="fingerprint-card">
         <div>
-          <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', fontWeight: 700, color: '#166534' }}>
-            Failure Fingerprint
+          <div
+            style={{
+              fontSize: '0.65rem',
+              textTransform: 'uppercase',
+              fontWeight: 700,
+              color: isStandby ? '#475569' : isAbstain ? '#991b1b' : '#166534',
+            }}
+          >
+            {isStandby ? 'Telemetry State' : 'Failure Fingerprint'}
           </div>
-          <div style={{ fontFamily: 'JetBrains Mono', fontWeight: 700, color: '#15803d', fontSize: '0.85rem' }}>
+          <div
+            style={{
+              fontFamily: 'JetBrains Mono',
+              fontWeight: 700,
+              color: isStandby ? '#334155' : isAbstain ? '#991b1b' : '#15803d',
+              fontSize: '0.85rem',
+            }}
+          >
             {failureFingerprint}
           </div>
         </div>
         <span
           className="diag-pill"
           style={{
-            background: isAbstain ? '#fee2e2' : '#dcfce7',
-            color: isAbstain ? '#991b1b' : '#166534',
+            background: isStandby ? '#f1f5f9' : isAbstain ? '#fee2e2' : '#dcfce7',
+            color: isStandby ? '#475569' : isAbstain ? '#991b1b' : '#166534',
+            border: isStandby ? '1px solid #cbd5e1' : undefined,
           }}
         >
-          {isAbstain ? 'ABSTAIN' : 'CONSENSUS'}
+          {isStandby ? 'STANDBY' : isAbstain ? 'ABSTAIN' : 'CONSENSUS'}
         </span>
       </div>
 
@@ -269,7 +309,15 @@ export const VerificationPanel: React.FC<VerificationPanelProps> = ({
                 {riskLevel}
               </div>
               <div className="kpi-sub">
-                {isAbstain ? 'Safety Guardrail' : riskLevel === 'CRITICAL' ? 'Immediate Action' : riskLevel === 'HIGH' ? 'Elevated Caution' : 'Nominal'}
+                {isStandby
+                  ? 'Awaiting Audit'
+                  : isAbstain
+                  ? 'Safety Guardrail'
+                  : riskLevel === 'CRITICAL'
+                  ? 'Immediate Action'
+                  : riskLevel === 'HIGH'
+                  ? 'Elevated Caution'
+                  : 'Nominal'}
               </div>
             </div>
 
@@ -286,7 +334,7 @@ export const VerificationPanel: React.FC<VerificationPanelProps> = ({
               <div className="kpi-val" style={{ color: 'var(--noaa-blue)' }}>
                 {stabilityScore}/100
               </div>
-              <div className="kpi-sub">Trajectory spread</div>
+              <div className="kpi-sub">{isStandby ? 'Baseline nominal' : 'Trajectory spread'}</div>
             </div>
 
             <div className="kpi-card">
@@ -301,12 +349,12 @@ export const VerificationPanel: React.FC<VerificationPanelProps> = ({
                 className="kpi-val"
                 style={{
                   fontSize: trustState.length > 12 ? '0.78rem' : '0.92rem',
-                  color: isAbstain ? 'var(--trust-abstain)' : 'var(--trust-normal)',
+                  color: isStandby ? 'var(--noaa-muted)' : isAbstain ? 'var(--trust-abstain)' : 'var(--trust-normal)',
                 }}
               >
                 {trustState.replace(/_/g, ' ')}
               </div>
-              <div className="kpi-sub">Pipeline integrity</div>
+              <div className="kpi-sub">{isStandby ? 'Pipeline ready' : 'Pipeline integrity'}</div>
             </div>
           </div>
 
@@ -408,7 +456,9 @@ export const VerificationPanel: React.FC<VerificationPanelProps> = ({
             </>
           ) : (
             <div style={{ padding: '20px', textAlign: 'center', color: '#64748b', fontSize: '0.85rem' }}>
-              Physical explainability attribution unavailable for abstained or unready predictions.
+              {isStandby
+                ? 'Select atmospheric target and click "Audit Reliability" to compute TreeSHAP synoptic explainability drivers.'
+                : 'Physical explainability attribution unavailable for abstained or unready predictions.'}
             </div>
           )}
         </div>

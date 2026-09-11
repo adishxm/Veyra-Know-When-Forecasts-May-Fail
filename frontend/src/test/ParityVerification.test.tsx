@@ -274,4 +274,25 @@ describe('Frontend <-> Backend Exact Value Parity Regression Tests', () => {
     // Verify trust state does NOT say SUPPORTED
     expect(screen.queryByText('SUPPORTED')).not.toBeInTheDocument();
   });
+
+  it('renders clean telemetry standby state on initial load without false abstention warning', async () => {
+    vi.spyOn(apiClient, 'getHealth').mockResolvedValue({
+      data: {
+        status: 'healthy',
+        service: 'veyra-backend',
+        version: '3.0.0',
+      },
+    });
+
+    render(<App />);
+
+    // Must show the standby notice, NOT the red abstention alert
+    expect(screen.getByText(/Telemetry Standby • Awaiting Reliability Audit/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Prediction Safely Abstained: Out of Trust Domain/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/OUT_OF_DOMAIN_OR_VOLATILE/i)).not.toBeInTheDocument();
+
+    // VerificationPanel should indicate STANDBY in KPI cards
+    expect(screen.getAllByText('STANDBY').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('Awaiting Audit')).toBeInTheDocument();
+  });
 });
