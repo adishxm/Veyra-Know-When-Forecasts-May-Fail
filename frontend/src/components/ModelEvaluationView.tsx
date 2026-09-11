@@ -130,7 +130,7 @@ export const ModelEvaluationView: React.FC = () => {
                 </div>
                 <div>
                   <span style={{ color: 'var(--text-muted)' }}>Test Samples:</span>{' '}
-                  <strong>{data.test_samples.toLocaleString()} ({data.test_cycles} cycles)</strong>
+                  <strong>{data.test_samples.toLocaleString('en-US')} ({data.test_cycles} cycles)</strong>
                 </div>
               </div>
 

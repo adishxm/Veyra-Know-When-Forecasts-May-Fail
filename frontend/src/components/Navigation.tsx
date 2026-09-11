@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Crosshair, Layers, Cpu, ExternalLink, Menu, X } from 'lucide-react';
+import { Crosshair, Layers, Cpu, FileCode, ExternalLink, Menu, X } from 'lucide-react';
 
-export type ActiveView = 'sentinel' | 'batch' | 'models';
+export type ActiveView = 'sentinel' | 'batch' | 'models' | 'docs';
+
+const DOCS_EXTERNAL_URL = 'https://veyra-know-when-forecasts-may-fail.onrender.com/docs';
 
 interface NavigationProps {
   view: ActiveView;
@@ -39,12 +41,19 @@ export const Navigation: React.FC<NavigationProps> = ({ view, setView }) => {
           className="mobile-menu-btn"
           onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
           aria-label="Toggle Navigation Menu"
+          aria-expanded={mobileMenuOpen}
         >
           {mobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
           <span>Menu</span>
         </button>
         <span className="mobile-current-view">
-          {view === 'sentinel' ? 'Reliability Sentinel' : view === 'batch' ? 'Batch Evaluation' : 'Model Registry'}
+          {view === 'sentinel'
+            ? 'Reliability Sentinel'
+            : view === 'batch'
+            ? 'Batch Evaluation'
+            : view === 'models'
+            ? 'Model Registry'
+            : 'API Documentation'}
         </span>
       </div>
 
@@ -97,14 +106,26 @@ export const Navigation: React.FC<NavigationProps> = ({ view, setView }) => {
           </button>
         </div>
 
+        {/* Embedded API Docs Button */}
+        <div className="dropdown">
+          <button
+            type="button"
+            className={view === 'docs' ? 'active' : ''}
+            onClick={() => handleSelectView('docs')}
+          >
+            <FileCode size={16} /> API Docs
+          </button>
+        </div>
+
         {/* External API Docs Link */}
         <div className="nav-external-link">
           <a
-            href="/docs"
+            href={DOCS_EXTERNAL_URL}
             target="_blank"
             rel="noreferrer"
+            title="Open Swagger in new tab"
           >
-            API Docs <ExternalLink size={13} />
+            Open Swagger <ExternalLink size={13} />
           </a>
         </div>
       </div>

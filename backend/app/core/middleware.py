@@ -74,7 +74,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
         if settings.ENABLE_SECURITY_HEADERS:
             response.headers["X-Content-Type-Options"] = "nosniff"
-            response.headers["X-Frame-Options"] = "DENY"
+            if request.url.path not in ("/docs", "/redoc", "/openapi.json"):
+                response.headers["X-Frame-Options"] = "DENY"
             response.headers["X-XSS-Protection"] = "1; mode=block"
             response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
 

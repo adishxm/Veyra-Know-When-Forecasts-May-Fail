@@ -7,6 +7,7 @@ import { TimelineChart } from './components/TimelineChart';
 import { VerificationPanel } from './components/VerificationPanel';
 import { BatchPanel } from './components/BatchPanel';
 import { ModelCatalog } from './components/ModelCatalog';
+import { ApiDocsView } from './components/ApiDocsView';
 import { apiClient } from './api/client';
 import { BENCHMARK_LOCATIONS } from './data/locations';
 import {
@@ -223,6 +224,7 @@ export const App: React.FC = () => {
 
         {view === 'batch' && <BatchPanel />}
         {view === 'models' && <ModelCatalog />}
+        {view === 'docs' && <ApiDocsView />}
       </main>
 
       {/* Footer */}
@@ -235,7 +237,11 @@ export const App: React.FC = () => {
           >
             GitHub Repository
           </a>
-          <a href="/docs" target="_blank" rel="noreferrer">
+          <a
+            href="https://veyra-know-when-forecasts-may-fail.onrender.com/docs"
+            target="_blank"
+            rel="noreferrer"
+          >
             FastAPI Documentation
           </a>
           <a href="/v1/health" target="_blank" rel="noreferrer">

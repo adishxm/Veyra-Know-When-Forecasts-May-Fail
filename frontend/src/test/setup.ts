@@ -2,6 +2,31 @@ import '@testing-library/jest-dom';
 import React from 'react';
 import { vi } from 'vitest';
 
+vi.mock('leaflet', () => ({
+  default: {
+    Icon: {
+      Default: {
+        prototype: {},
+        mergeOptions: vi.fn(),
+      },
+    },
+  },
+  Icon: {
+    Default: {
+      prototype: {},
+      mergeOptions: vi.fn(),
+    },
+  },
+}));
+
+vi.mock('react-leaflet', () => ({
+  MapContainer: ({ children }: any) => React.createElement('div', { 'data-testid': 'mock-map-container' }, children),
+  TileLayer: () => React.createElement('div', { 'data-testid': 'mock-tile-layer' }),
+  Marker: ({ children }: any) => React.createElement('div', { 'data-testid': 'mock-marker' }, children),
+  Popup: ({ children }: any) => React.createElement('div', { 'data-testid': 'mock-popup' }, children),
+  useMap: () => ({ setView: vi.fn() }),
+}));
+
 vi.mock('react-chartjs-2', () => ({
   Line: (props: any) =>
     React.createElement('div', {

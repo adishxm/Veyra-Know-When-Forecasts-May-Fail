@@ -116,7 +116,7 @@ export const BatchPanel: React.FC = () => {
         </span>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: '20px' }}>
+      <div className="batch-layout">
         {/* Left: Input Form */}
         <div>
           <div className="form-group">
